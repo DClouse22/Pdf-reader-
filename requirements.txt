@@ -1,0 +1,6 @@
+
+streamlit
+pymupdf
+pandas
+fpdf2
+matplotlib
