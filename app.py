@@ -120,19 +120,25 @@ class ILEARNTableParser:
                         if debug:
                             st.write(f"Line {i}: Found standard {standard_match.group(1)}")
                     
-                    # Collect symbols - check for any of the performance symbols
-                    if '✓' in line or '✔' in line:
-                        symbols_in_page.append((i, 'correct', '✓'))
+                    # Collect symbols - look for the ACTUAL characters: v, O, X
+                    # These appear as single characters in their own lines or cells
+                    line_stripped = line.strip()
+                    
+                    # Check for correct (v or checkmark)
+                    if line_stripped in ['v', 'V', '✓', '✔']:
+                        symbols_in_page.append((i, 'correct', 'v'))
                         if debug:
-                            st.write(f"Line {i}: Found ✓")
-                    elif '✗' in line or '✘' in line or '❌' in line:
-                        symbols_in_page.append((i, 'incorrect', '✗'))
+                            st.write(f"Line {i}: Found v (correct)")
+                    # Check for incorrect (X)
+                    elif line_stripped in ['X', 'x', '✗', '✘', '❌']:
+                        symbols_in_page.append((i, 'incorrect', 'X'))
                         if debug:
-                            st.write(f"Line {i}: Found ✗")
-                    elif '⊖' in line or '◯' in line or '○' in line:
-                        symbols_in_page.append((i, 'partial', '⊖'))
+                            st.write(f"Line {i}: Found X (incorrect)")
+                    # Check for partial (O)
+                    elif line_stripped in ['O', 'o', '0', '⊖', '◯', '○']:
+                        symbols_in_page.append((i, 'partial', 'O'))
                         if debug:
-                            st.write(f"Line {i}: Found ⊖")
+                            st.write(f"Line {i}: Found O (partial)")
             
             # Now match standards with symbols based on proximity
             if current_student and standards_in_page:
