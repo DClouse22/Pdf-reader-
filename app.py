@@ -44,39 +44,57 @@ class ILEARNParser:
     def _parse_single_file(self, uploaded_file):
         doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
         
+        current_student = None
+        students_found = []
+        
         for page_num in range(len(doc)):
             page = doc[page_num]
             text = page.get_text()
             
-            # Extract student info from first page
-            if page_num == 0:
-                student_info = self._extract_student_info(text)
-                if student_info['name']:
-                    student_name = student_info['name']
-                    self.student_data[student_name] = {
+            # Check for student name on every page (new student starts on page 1, 5, 9, etc.)
+            student_info = self._extract_student_info(text)
+            if student_info['name']:
+                current_student = student_info['name']
+                # Only create new entry if this student doesn't exist yet
+                if current_student not in self.student_data:
+                    self.student_data[current_student] = {
                         'lexile': student_info['lexile'],
                         'proficiency': student_info['proficiency'],
                         'standards': defaultdict(lambda: {'correct': 0, 'incorrect': 0, 'partial': 0})
                     }
+                    students_found.append(current_student)
             
-            # Extract standards from pages with tables (typically page 3+)
-            if page_num >= 2:  # Standards tables start on page 3
-                self._extract_standards_from_table(text, student_name if 'student_name' in locals() else None)
+            # Extract standards from pages with tables
+            # Only process if we have a current student
+            if current_student and 'RC|5.RC' in text:
+                self._extract_standards_from_table(text, current_student)
         
         doc.close()
+        
+        # Add info message about students found
+        if students_found:
+            self.errors.append(f"✅ Found {len(students_found)} students in {uploaded_file.name}: {', '.join(students_found)}")
     
     def _extract_student_info(self, text):
-        """Extract student name, lexile, and proficiency from first page"""
+        """Extract student name, lexile, and proficiency from page"""
         info = {'name': '', 'lexile': 0, 'proficiency': ''}
         
         lines = text.split('\n')
-        for line in lines:
+        for i, line in enumerate(lines):
+            # Student name appears as "Name: LastName, FirstName"
             if line.startswith('Name:'):
-                info['name'] = line.replace('Name:', '').strip()
+                name = line.replace('Name:', '').strip()
+                # Only set if it looks like a real name (not empty)
+                if name and len(name) > 2:
+                    info['name'] = name
+            
+            # Lexile can appear on first page of each student
             elif 'Lexile® Measure Range Lower Limit:' in line:
                 lex_match = re.search(r'(\d+)L', line)
                 if lex_match:
                     info['lexile'] = int(lex_match.group(1))
+            
+            # Performance Level on first page of each student
             elif line.startswith('Performance Level:'):
                 info['proficiency'] = line.replace('Performance Level:', '').strip()
         
@@ -204,9 +222,12 @@ def main():
         parser.parse_files(uploaded_files)
     
     if parser.errors:
-        with st.expander("⚠️ Processing Warnings"):
+        with st.expander("ℹ️ Processing Information", expanded=True):
             for error in parser.errors:
-                st.warning(error)
+                if error.startswith("✅"):
+                    st.success(error)
+                else:
+                    st.warning(error)
     
     if not parser.student_data:
         st.error("❌ No student data found")
