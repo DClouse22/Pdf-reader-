@@ -7,15 +7,13 @@ from fpdf import FPDF
 import io
 import plotly.express as px
 from datetime import datetime
+import cv2
+import numpy as np
+from pdf2image import convert_from_bytes
+from PIL import Image
 
-# =============================
-# PAGE CONFIGURATION
-# =============================
-st.set_page_config(page_title="ILEARN Analytics Tool", page_icon="📊", layout="wide")
+st.set_page_config(page_title="ILEARN Analytics Tool - OCR", page_icon="📊", layout="wide")
 
-# =============================
-# CUSTOM CSS
-# =============================
 st.markdown("""
 <style>
 .main > div {padding-top: 2rem;}
@@ -24,11 +22,78 @@ h1 {color: #1f77b4;}
 </style>
 """, unsafe_allow_html=True)
 
-# =============================
-# PARSER CLASS FOR TABLE-BASED PDFs
-# =============================
-class ILEARNTableParser:
-    """Parser specifically designed for table-based ILEARN PDF reports"""
+class SymbolDetector:
+    """Detect checkmark symbols using image processing"""
+    
+    def __init__(self):
+        self.debug_images = []
+    
+    def detect_symbols_in_region(self, image_array, x, y, w, h, debug=False):
+        """
+        Detect symbols (checkmarks, X, O) in a specific region of the image
+        Returns: 'correct', 'incorrect', 'partial', or None
+        """
+        # Extract region
+        region = image_array[y:y+h, x:x+w]
+        
+        if region.size == 0:
+            return None
+        
+        # Convert to grayscale
+        if len(region.shape) == 3:
+            gray = cv2.cvtColor(region, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = region
+        
+        # Threshold to get black marks
+        _, binary = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+        
+        # Count black pixels (marks)
+        black_pixel_ratio = np.sum(binary > 0) / binary.size
+        
+        if debug:
+            self.debug_images.append({
+                'region': region,
+                'binary': binary,
+                'ratio': black_pixel_ratio
+            })
+        
+        # If very few black pixels, it's empty
+        if black_pixel_ratio < 0.05:
+            return None
+        
+        # Analyze shape characteristics
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if not contours:
+            return None
+        
+        # Get the largest contour
+        largest_contour = max(contours, key=cv2.contourArea)
+        area = cv2.contourArea(largest_contour)
+        
+        if area < 50:  # Too small
+            return None
+        
+        # Analyze shape
+        perimeter = cv2.arcLength(largest_contour, True)
+        circularity = 4 * np.pi * area / (perimeter * perimeter) if perimeter > 0 else 0
+        
+        # Checkmark (v): angular, not circular, moderate complexity
+        # X: two diagonal lines, angular
+        # O (circle): high circularity
+        
+        if circularity > 0.7:  # Circular shape = O (partial)
+            return 'partial'
+        elif black_pixel_ratio > 0.15:  # Dense mark = X (incorrect)
+            return 'incorrect'
+        elif black_pixel_ratio > 0.08:  # Moderate mark = checkmark (correct)
+            return 'correct'
+        
+        return None
+
+class ILEARNOCRParser:
+    """Parser using OCR and computer vision to extract symbols"""
 
     def __init__(self):
         self.student_data = defaultdict(lambda: {
@@ -39,6 +104,7 @@ class ILEARNTableParser:
         })
         self.standards_summary = defaultdict(lambda: {'correct': 0, 'incorrect': 0, 'partial': 0, 'total_tests': 0})
         self.errors = []
+        self.symbol_detector = SymbolDetector()
 
     def parse_files(self, uploaded_files):
         progress_bar = st.progress(0)
@@ -50,6 +116,7 @@ class ILEARNTableParser:
                 self._parse_single_file(uploaded_file)
             except Exception as e:
                 self.errors.append(f"Error in {uploaded_file.name}: {str(e)}")
+                st.error(f"Error: {str(e)}")
 
             progress_bar.progress((idx + 1) / len(uploaded_files))
 
@@ -57,22 +124,20 @@ class ILEARNTableParser:
         return self
 
     def _parse_single_file(self, uploaded_file):
+        """Parse PDF using both text extraction and OCR"""
+        
+        debug = st.session_state.get('debug_mode', False)
+        
+        # First, extract text normally for student info
         doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
         current_student = None
         
-        debug = st.session_state.get('debug_mode', False)
-
-        for page_num, page in enumerate(doc):
+        # Extract basic info from text
+        for page in doc:
             text = page.get_text()
             lines = text.split("\n")
-            
-            if debug:
-                st.write(f"**Page {page_num + 1} Sample:**")
-                st.text("\n".join(lines[:30]))
 
-            # Parse student info from first page
-            for i, line in enumerate(lines):
-                # Extract student name - format: "Name: Last, First"
+            for line in lines:
                 if line.strip().startswith("Name:"):
                     name_part = line.split("Name:")[-1].strip()
                     if name_part and len(name_part) > 2:
@@ -81,109 +146,140 @@ class ILEARNTableParser:
                         if debug:
                             st.success(f"Found student: {current_student}")
 
-                # Extract Lexile - format: "Lexile® Measure Range Lower Limit: 725L"
                 if current_student and ("Lexile" in line and "Lower Limit:" in line):
                     lex_match = re.search(r'(\d+)L', line)
                     if lex_match:
                         self.student_data[current_student]['lexile'] = int(lex_match.group(1))
-                        if debug:
-                            st.success(f"Found Lexile: {lex_match.group(1)}L")
 
-                # Extract Performance Level - format: "Performance Level: Approaching Proficiency"
                 if current_student and line.strip().startswith("Performance Level:"):
                     prof = line.split("Performance Level:")[-1].strip()
                     self.student_data[current_student]['proficiency'] = prof
-                    if debug:
-                        st.success(f"Found proficiency: {prof}")
-
-            # Parse standards table data using improved strategy
-            # Strategy: Find table sections and group standards with their symbols
-            
-            # First, find where performance tables start
-            table_started = False
-            standards_in_page = []
-            symbols_in_page = []
-            
-            for i, line in enumerate(lines):
-                # Detect start of performance table
-                if 'Student Performance*' in line or 'Performance Level Descriptor' in line:
-                    table_started = True
-                    if debug:
-                        st.info(f"Table detected at line {i}")
-                        st.write("**Showing next 50 lines with character codes:**")
-                        for j in range(i, min(i+50, len(lines))):
-                            preview = lines[j][:80]
-                            # Show line with repr to see exact characters
-                            st.text(f"{j}: {repr(preview)}")
-                
-                # If we're in a table, collect standards and symbols separately
-                if table_started:
-                    # Collect standards
-                    standard_match = re.search(r'(RC\|\d+\.RC\.\d+)', line)
-                    if standard_match:
-                        standards_in_page.append((i, standard_match.group(1)))
-                        if debug:
-                            st.write(f"Line {i}: Found standard {standard_match.group(1)}")
-                    
-                    # Collect symbols - look for the ACTUAL characters: v, O, X
-                    # These appear as single characters in their own lines or cells
-                    line_stripped = line.strip()
-                    
-                    # Debug: show what we're checking
-                    if debug and line_stripped and len(line_stripped) <= 3 and i > 0:
-                        st.text(f"Line {i} stripped: '{line_stripped}' (len={len(line_stripped)}, chars={[c for c in line_stripped]})")
-                    
-                    # Check for correct (v or checkmark)
-                    if line_stripped in ['v', 'V', '✓', '✔']:
-                        symbols_in_page.append((i, 'correct', 'v'))
-                        if debug:
-                            st.success(f"Line {i}: Found v (correct)")
-                    # Check for incorrect (X)
-                    elif line_stripped in ['X', 'x', '✗', '✘', '❌']:
-                        symbols_in_page.append((i, 'incorrect', 'X'))
-                        if debug:
-                            st.success(f"Line {i}: Found X (incorrect)")
-                    # Check for partial (O)
-                    elif line_stripped in ['O', 'o', '0', '⊖', '◯', '○']:
-                        symbols_in_page.append((i, 'partial', 'O'))
-                        if debug:
-                            st.success(f"Line {i}: Found O (partial)")
-            
-            # Now match standards with symbols based on proximity
-            if current_student and standards_in_page:
-                if debug:
-                    st.write(f"**Matching {len(standards_in_page)} standards with {len(symbols_in_page)} symbols**")
-                
-                for std_idx, (std_line, standard) in enumerate(standards_in_page):
-                    # Find the closest symbol that comes after this standard
-                    # but before the next standard (if any)
-                    next_std_line = standards_in_page[std_idx + 1][0] if std_idx + 1 < len(standards_in_page) else len(lines)
-                    
-                    found_symbol = False
-                    for sym_line, sym_type, sym_char in symbols_in_page:
-                        # Symbol should be between current standard and next standard
-                        if std_line <= sym_line < next_std_line:
-                            # Record the result
-                            self.student_data[current_student]['standards'][standard][sym_type] += 1
-                            self.standards_summary[standard][sym_type] += 1
-                            self.standards_summary[standard]['total_tests'] += 1
-                            found_symbol = True
-                            
-                            if debug:
-                                st.success(f"  {standard}: {sym_char} {sym_type}")
-                            
-                            # Remove this symbol so it's not matched again
-                            symbols_in_page.remove((sym_line, sym_type, sym_char))
-                            break
-                    
-                    if not found_symbol and debug:
-                        st.warning(f"  {standard}: No symbol found")
 
         doc.close()
+        
+        if not current_student:
+            self.errors.append("Could not find student name in PDF")
+            return
+        
+        # Now convert PDF to images for OCR
+        uploaded_file.seek(0)  # Reset file pointer
+        pdf_bytes = uploaded_file.read()
+        
+        try:
+            # Convert PDF pages to images (lower DPI for speed, increase to 300 for better accuracy)
+            images = convert_from_bytes(pdf_bytes, dpi=200)
+            
+            if debug:
+                st.write(f"Converted {len(images)} pages to images")
+            
+            # Process pages that contain performance tables (typically pages 3-4, 7-8, etc.)
+            for page_num, image in enumerate(images):
+                if debug:
+                    st.write(f"**Processing page {page_num + 1}**")
+                
+                # Convert PIL image to numpy array
+                img_array = np.array(image)
+                
+                # Extract text with positions using PyMuPDF for this page
+                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+                page = doc[page_num]
+                text = page.get_text()
+                
+                # Check if this is a performance table page
+                if 'Student Performance*' not in text and 'Performance Level Descriptor' not in text:
+                    continue
+                
+                if debug:
+                    st.info(f"Page {page_num + 1} contains performance table")
+                
+                # Parse the table structure from text
+                lines = text.split("\n")
+                standards_in_page = []
+                
+                table_started = False
+                for i, line in enumerate(lines):
+                    if 'Student Performance*' in line or 'Performance Level Descriptor' in line:
+                        table_started = True
+                    
+                    if table_started:
+                        standard_match = re.search(r'(RC\|\d+\.RC\.\d+)', line)
+                        if standard_match:
+                            standards_in_page.append(standard_match.group(1))
+                
+                if debug:
+                    st.write(f"Found {len(standards_in_page)} standards on this page")
+                
+                # Get text positions using PyMuPDF
+                blocks = page.get_text("dict")["blocks"]
+                
+                # Find "Student Performance*" column location
+                perf_col_x = None
+                for block in blocks:
+                    if "lines" in block:
+                        for line in block["lines"]:
+                            for span in line["spans"]:
+                                if "Performance*" in span["text"]:
+                                    perf_col_x = span["bbox"][0]  # x position
+                                    break
+                
+                if not perf_col_x:
+                    if debug:
+                        st.warning(f"Could not locate Performance column on page {page_num + 1}")
+                    continue
+                
+                # For each standard, find its Y position and check for symbol in performance column
+                for standard in standards_in_page:
+                    standard_y = None
+                    
+                    # Find Y position of this standard
+                    for block in blocks:
+                        if "lines" in block:
+                            for line in block["lines"]:
+                                for span in line["spans"]:
+                                    if standard in span["text"]:
+                                        standard_y = span["bbox"][1]  # y position
+                                        break
+                    
+                    if standard_y:
+                        # Define region to check (performance column at this standard's row)
+                        # Convert PDF coordinates to image coordinates
+                        page_height = page.rect.height
+                        image_height = img_array.shape[0]
+                        scale = image_height / page_height
+                        
+                        # Approximate position of symbol in performance column
+                        symbol_x = int(perf_col_x * scale * 1.5)  # Adjust multiplier based on table layout
+                        symbol_y = int(standard_y * scale)
+                        symbol_w = int(30 * scale)  # Symbol width
+                        symbol_h = int(30 * scale)  # Symbol height
+                        
+                        # Ensure coordinates are within bounds
+                        symbol_x = max(0, min(symbol_x, img_array.shape[1] - symbol_w))
+                        symbol_y = max(0, min(symbol_y, img_array.shape[0] - symbol_h))
+                        
+                        # Detect symbol in this region
+                        symbol_type = self.symbol_detector.detect_symbols_in_region(
+                            img_array, symbol_x, symbol_y, symbol_w, symbol_h, debug=debug
+                        )
+                        
+                        if symbol_type:
+                            self.student_data[current_student]['standards'][standard][symbol_type] += 1
+                            self.standards_summary[standard][symbol_type] += 1
+                            self.standards_summary[standard]['total_tests'] += 1
+                            
+                            if debug:
+                                st.success(f"  {standard}: {symbol_type}")
+                        elif debug:
+                            st.warning(f"  {standard}: No symbol detected")
+                
+                doc.close()
+                
+        except Exception as e:
+            self.errors.append(f"OCR Error: {str(e)}")
+            if debug:
+                st.error(f"OCR processing failed: {str(e)}")
 
-# =============================
-# REPORT GENERATOR
-# =============================
+# Report generator (same as before)
 class ReportGenerator:
     def __init__(self, school_name="", logo_file=None):
         self.school_name = school_name
@@ -227,15 +323,19 @@ class ReportGenerator:
 
         return pdf.output(dest="S").encode("latin-1")
 
-# =============================
-# MAIN APPLICATION
-# =============================
 def main():
-    st.title("📊 ILEARN Analytics Tool v2")
-    st.markdown("**Optimized for Indiana ILEARN Table-Based Reports**")
+    st.title("📊 ILEARN Analytics Tool - OCR Version")
+    st.markdown("**Using Computer Vision to Extract Performance Symbols**")
+    
+    st.info("""
+    This version uses **OCR and image recognition** to detect the checkmark symbols (v, O, X) 
+    that are rendered as graphics in the PDF.
+    
+    ⚠️ **Note:** This is an experimental approach and may require manual verification.
+    """)
+    
     st.markdown("---")
 
-    # Sidebar
     with st.sidebar:
         st.header("⚙️ Settings")
         school_name = st.text_input("School Name:", placeholder="Your school")
@@ -244,26 +344,23 @@ def main():
         st.markdown("---")
         st.markdown("### 🐛 Debug")
         debug_mode = st.checkbox("Enable Debug Mode", value=False, 
-                                 help="Shows detailed parsing information")
+                                 help="Shows detailed OCR processing information")
         st.session_state['debug_mode'] = debug_mode
 
         st.markdown("---")
         st.markdown("### 📖 About")
-        st.markdown("Analyzes ILEARN ELA Checkpoint reports with table-based data")
+        st.markdown("Analyzes ILEARN ELA Checkpoint reports using OCR")
 
-    # File upload
     uploaded_files = st.file_uploader("📁 Upload ILEARN PDF Reports", type="pdf", accept_multiple_files=True)
 
     if not uploaded_files:
         st.info("👆 Upload PDF files to begin")
         st.stop()
 
-    # Parse files
-    with st.spinner("Processing..."):
-        parser = ILEARNTableParser()
+    with st.spinner("Processing PDFs with OCR (this may take a minute)..."):
+        parser = ILEARNOCRParser()
         parser.parse_files(uploaded_files)
 
-    # Show errors
     if parser.errors:
         with st.expander("⚠️ Warnings"):
             for error in parser.errors:
@@ -274,7 +371,13 @@ def main():
         st.stop()
 
     if not parser.standards_summary:
-        st.error("No standards found")
+        st.warning("No performance data could be extracted. Try enabling Debug Mode to see what's happening.")
+        # Still show student info
+        students = list(parser.student_data.keys())
+        st.subheader("📋 Students Found")
+        for student in students:
+            info = parser.student_data[student]
+            st.write(f"**{student}** - Lexile: {info['lexile']}L, Proficiency: {info['proficiency']}")
         st.stop()
 
     # Calculate metrics
@@ -323,7 +426,7 @@ def main():
             })
 
     if not data:
-        st.warning("No standards performance data available")
+        st.warning("No standards performance data extracted")
         st.stop()
 
     df = pd.DataFrame(data)
