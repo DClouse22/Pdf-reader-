@@ -1,4 +1,3 @@
-
 import streamlit as st
 import fitz
 import re
@@ -137,8 +136,7 @@ class ReportGenerator:
         pdf.set_font("Arial", "B", 14)
         pdf.cell(0, 10, "Summary", ln=True)
         pdf.set_font("Arial", "", 11)
-        pdf.multi_cell(0, 6, f"Total Students: {metrics['total_students']}
-"
+        pdf.multi_cell(0, 6, f"Total Students: {metrics['total_students']}\n"
                               f"Average Lexile: {metrics['avg_lexile']}L")
         pdf.ln(5)
 
