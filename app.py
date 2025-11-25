@@ -110,6 +110,11 @@ class ILEARNTableParser:
                     table_started = True
                     if debug:
                         st.info(f"Table detected at line {i}")
+                        st.write("**Showing next 50 lines with character codes:**")
+                        for j in range(i, min(i+50, len(lines))):
+                            preview = lines[j][:80]
+                            # Show line with repr to see exact characters
+                            st.text(f"{j}: {repr(preview)}")
                 
                 # If we're in a table, collect standards and symbols separately
                 if table_started:
@@ -124,21 +129,25 @@ class ILEARNTableParser:
                     # These appear as single characters in their own lines or cells
                     line_stripped = line.strip()
                     
+                    # Debug: show what we're checking
+                    if debug and line_stripped and len(line_stripped) <= 3 and i > 0:
+                        st.text(f"Line {i} stripped: '{line_stripped}' (len={len(line_stripped)}, chars={[c for c in line_stripped]})")
+                    
                     # Check for correct (v or checkmark)
                     if line_stripped in ['v', 'V', '✓', '✔']:
                         symbols_in_page.append((i, 'correct', 'v'))
                         if debug:
-                            st.write(f"Line {i}: Found v (correct)")
+                            st.success(f"Line {i}: Found v (correct)")
                     # Check for incorrect (X)
                     elif line_stripped in ['X', 'x', '✗', '✘', '❌']:
                         symbols_in_page.append((i, 'incorrect', 'X'))
                         if debug:
-                            st.write(f"Line {i}: Found X (incorrect)")
+                            st.success(f"Line {i}: Found X (incorrect)")
                     # Check for partial (O)
                     elif line_stripped in ['O', 'o', '0', '⊖', '◯', '○']:
                         symbols_in_page.append((i, 'partial', 'O'))
                         if debug:
-                            st.write(f"Line {i}: Found O (partial)")
+                            st.success(f"Line {i}: Found O (partial)")
             
             # Now match standards with symbols based on proximity
             if current_student and standards_in_page:
