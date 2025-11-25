@@ -5,3 +5,7 @@ pandas
 fpdf2
 matplotlib
 plotly
+pdf2image
+Pillow
+numpy
+poppler-utils
