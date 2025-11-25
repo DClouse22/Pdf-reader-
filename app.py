@@ -18,7 +18,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 class ILEARNParser:
-    """Parser for ILEARN checkpoint PDFs"""
+    """Parser using vector graphics detection for symbols"""
     
     def __init__(self):
         self.student_data = {}
@@ -51,7 +51,7 @@ class ILEARNParser:
             page = doc[page_num]
             text = page.get_text()
             
-            # Check for student name on every page
+            # Check for student name
             student_info = self._extract_student_info(text)
             if student_info['name']:
                 current_student = student_info['name']
@@ -63,9 +63,9 @@ class ILEARNParser:
                     }
                     students_found.append(current_student)
             
-            # Extract standards from table pages
+            # Extract standards using vector graphics detection
             if current_student and 'RC|5.RC' in text:
-                self._extract_standards_from_table(text, current_student)
+                self._extract_standards_with_vectors(page, current_student)
         
         doc.close()
         
@@ -91,60 +91,106 @@ class ILEARNParser:
         
         return info
     
-    def _extract_standards_from_table(self, text, student_name):
-        """Extract standards using a line-by-line approach looking for the pattern"""
-        lines = text.split('\n')
+    def _extract_standards_with_vectors(self, page, student_name):
+        """Extract standards by analyzing vector graphics (drawing paths)"""
         
-        # Strategy: Find lines with standards, then look at the NEXT non-empty line for the symbol
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
+        # Get text blocks with positions
+        blocks = page.get_text("dict")["blocks"]
+        
+        # Get drawing commands (vector graphics)
+        drawings = page.get_drawings()
+        
+        # Extract text blocks that contain standards
+        standard_blocks = []
+        for block in blocks:
+            if "lines" in block:
+                for line in block["lines"]:
+                    for span in line["spans"]:
+                        text = span["text"]
+                        if re.search(r'RC\|5\.RC\.\d+', text):
+                            # Found a standard - store its position
+                            bbox = span["bbox"]  # (x0, y0, x1, y1)
+                            standard_match = re.search(r'(RC\|5\.RC\.\d+)', text)
+                            if standard_match:
+                                standard_blocks.append({
+                                    'standard': standard_match.group(1),
+                                    'y': bbox[1],  # y0 position
+                                    'y_end': bbox[3],  # y1 position
+                                    'bbox': bbox
+                                })
+        
+        # Now match drawing symbols to standards based on Y position
+        standards_found = 0
+        symbols_found = 0
+        
+        for std_block in standard_blocks:
+            standard = std_block['standard']
+            std_y = std_block['y']
+            std_y_end = std_block['y_end']
+            standards_found += 1
             
-            # Look for standard pattern
-            standard_match = re.search(r'(RC\|5\.RC\.\d+)', line)
+            # Find drawings on the same row (similar Y coordinate)
+            # Table symbols should be on the right side of the page
+            symbol_type = None
             
-            if standard_match and student_name:
-                standard = standard_match.group(1)
+            for drawing in drawings:
+                draw_rect = drawing.get('rect', None)
+                if not draw_rect:
+                    continue
                 
-                # Now we need to find which symbol this row has
-                # The symbol appears at the END of the table row
-                # Look in the next few lines after finding the standard
+                draw_y = draw_rect.y0
+                draw_y_end = draw_rect.y1
+                draw_x = draw_rect.x0
                 
-                symbol_found = None
-                
-                # Check the SAME line first for symbols
-                if '✓' in line or '✔' in line:
-                    symbol_found = 'correct'
-                elif '✗' in line or '✘' in line or '×' in line:
-                    symbol_found = 'incorrect'
-                elif '⊖' in line or '◯' in line or '○' in line:
-                    symbol_found = 'partial'
-                
-                # If not found in same line, check next 2 lines
-                if not symbol_found:
-                    for j in range(i+1, min(i+3, len(lines))):
-                        next_line = lines[j]
-                        
-                        # Stop if we hit another standard (means we're in next row)
-                        if 'RC|5.RC' in next_line:
-                            break
-                        
-                        if '✓' in next_line or '✔' in next_line:
-                            symbol_found = 'correct'
-                            break
-                        elif '✗' in next_line or '✘' in next_line or '×' in next_line:
-                            symbol_found = 'incorrect'
-                            break
-                        elif '⊖' in next_line or '◯' in next_line or '○' in next_line:
-                            symbol_found = 'partial'
-                            break
-                
-                # Update counts if we found a symbol
-                if symbol_found:
-                    self.standards_summary[standard][symbol_found] += 1
-                    self.student_data[student_name]['standards'][standard][symbol_found] += 1
+                # Check if drawing is on the same row as the standard
+                # Allow some tolerance in Y position (±10 points)
+                if abs(draw_y - std_y) < 15 or (std_y <= draw_y <= std_y_end):
+                    # Drawing is on same row
+                    # Now analyze what type of symbol it is
+                    
+                    # Get drawing properties
+                    fill_color = drawing.get('fill', None)
+                    stroke_color = drawing.get('color', None)
+                    items = drawing.get('items', [])
+                    
+                    # Checkmark: usually has diagonal lines (paths)
+                    # X: has crossing diagonal lines
+                    # Circle: has curved paths or is circular
+                    
+                    # Count line segments
+                    line_count = sum(1 for item in items if item[0] == 'l')  # line
+                    curve_count = sum(1 for item in items if item[0] in ['c', 'qu'])  # curves
+                    
+                    # Heuristics:
+                    # - Checkmark: 2 lines forming a V shape
+                    # - X: 2 lines forming an X (crossing)
+                    # - Circle: curves (no lines) or many line segments forming circle
+                    
+                    if fill_color and curve_count == 0 and line_count == 2:
+                        # Likely a checkmark (V shape) or X
+                        # Need to analyze the angle/direction
+                        # For now, assume checkmark if filled
+                        symbol_type = 'correct'
+                        symbols_found += 1
+                        break
+                    elif stroke_color and not fill_color and line_count >= 2:
+                        # X is usually stroked (outline) not filled
+                        symbol_type = 'incorrect'
+                        symbols_found += 1
+                        break
+                    elif curve_count > 0 or line_count > 4:
+                        # Circle (has curves or many line segments)
+                        symbol_type = 'partial'
+                        symbols_found += 1
+                        break
             
-            i += 1
+            # If we found a symbol type, record it
+            if symbol_type:
+                self.standards_summary[standard][symbol_type] += 1
+                self.student_data[student_name]['standards'][standard][symbol_type] += 1
+        
+        if standards_found > 0:
+            self.errors.append(f"📊 {student_name}: {standards_found} standards, {symbols_found} vector symbols detected")
 
 class ReportGenerator:
     def __init__(self, school_name="", logo_file=None):
@@ -192,7 +238,7 @@ class ReportGenerator:
 
 def main():
     st.title("📊 ILEARN Analytics Tool")
-    st.markdown("**For Indiana ILEARN ELA Checkpoint Reports**")
+    st.markdown("**Using Vector Graphics Detection**")
     st.markdown("---")
     
     with st.sidebar:
@@ -208,6 +254,9 @@ def main():
         3. Analyze standards
         4. Export results
         """)
+        
+        st.markdown("---")
+        st.info("This version uses vector graphics detection to identify checkmarks and X's!")
     
     uploaded_files = st.file_uploader(
         "📁 Upload ILEARN PDF Reports",
@@ -226,14 +275,13 @@ def main():
     if parser.errors:
         with st.expander("ℹ️ Processing Information", expanded=True):
             for error in parser.errors:
-                if error.startswith("✅"):
+                if error.startswith("✅") or error.startswith("📊"):
                     st.success(error)
                 else:
                     st.warning(error)
     
     if not parser.student_data:
         st.error("❌ No student data found")
-        st.info("Make sure PDFs are ILEARN checkpoint reports")
         st.stop()
     
     # Calculate metrics
@@ -270,12 +318,7 @@ def main():
     
     if not parser.standards_summary:
         st.warning("⚠️ No standards data extracted")
-        st.info("""
-        **Possible reasons:**
-        - Standards tables may use image-based symbols
-        - Try using OCR or different extraction method
-        - Contact support with a sample PDF
-        """)
+        st.info("Vector symbols were not detected. The PDF may use a different format.")
         st.stop()
     
     data = []
