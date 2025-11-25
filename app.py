@@ -49,7 +49,8 @@ class ILEARNParser:
         self.proficiency_levels = []
         self.student_lexile_map = {}
         self.student_proficiency_map = {}
-        self.standard_pattern = re.compile(r"RC\\n5\.RC\.\d+")
+        # More flexible pattern to match various standard formats
+        self.standard_pattern = re.compile(r"(?:RC)?\\n?\d+\.(?:RC|RL|RI|RV|W|L|SL)\.?\d+", re.IGNORECASE)
         self.errors = []
         
     def parse_files(self, uploaded_files):
@@ -243,12 +244,25 @@ def main():
     # Check if data was extracted
     if not parser.student_names:
         st.error("No student data found in uploaded files. Please verify the PDF format.")
+        
+        # Debug information
+        with st.expander("🔍 Debug Information - Click to see what was found"):
+            st.write(f"**Files processed:** {len(uploaded_files)}")
+            st.write(f"**Students found:** {len(parser.student_names)}")
+            st.write(f"**Standards found:** {len(parser.standards_items)}")
+            st.write(f"**Lexile values found:** {len(parser.lexile_values)}")
+            
+            if parser.errors:
+                st.write("**Errors encountered:**")
+                for error in parser.errors:
+                    st.write(f"- {error}")
+        
         st.stop()
     
     # Calculate metrics
     total_students = len(set(parser.student_names))
     avg_lexile = int(sum(parser.lexile_values) / len(parser.lexile_values)) if parser.lexile_values else 0
-    at_above = sum(1 for level in parser.proficiency_levels if "At" in level or "Above" in level)
+    at_above = sum(1 for level in parser.proficiency_levels if level and ("At" in level or "Above" in level))
     needs_support = total_students - at_above
     at_above_pct = (at_above / total_students) * 100 if total_students else 0
     needs_support_pct = (needs_support / total_students) * 100 if total_students else 0
@@ -305,6 +319,12 @@ def main():
         })
     
     df = pd.DataFrame(data)
+    
+    # Check if dataframe has data before sorting
+    if df.empty or 'Success Rate Value' not in df.columns:
+        st.warning("⚠️ No academic standards data found in the uploaded PDFs. Please verify the PDF format matches ILEARN report structure.")
+        st.stop()
+    
     df = df.sort_values("Success Rate Value", ascending=False)
     
     # Class Performance Section
