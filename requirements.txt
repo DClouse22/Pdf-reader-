@@ -8,4 +8,4 @@ plotly
 pdf2image
 Pillow
 numpy
-poppler-utils
+
