@@ -6,47 +6,26 @@ from collections import defaultdict
 from fpdf import FPDF
 import io
 import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime
 
-# ===============================================================================
-# PAGE CONFIGURATION
-# ===============================================================================
-st.set_page_config(
-    page_title="ILEARN Analytics Tool",
-    page_icon="📊",
-    layout="wide"
-)
+st.set_page_config(page_title="ILEARN Analytics Tool", page_icon="📊", layout="wide")
 
-# ===============================================================================
-# CUSTOM CSS
-# ===============================================================================
 st.markdown("""
     <style>
     .main > div {padding-top: 2rem;}
     .stMetric {background-color: #f0f2f6; padding: 15px; border-radius: 10px;}
-    h1 {color: #1f77b4;}
     </style>
 """, unsafe_allow_html=True)
 
-# ===============================================================================
-# PARSER CLASS
-# ===============================================================================
 class ILEARNParser:
-    """Parser for ILEARN PDF reports"""
+    """Parser for ILEARN checkpoint PDFs"""
     
     def __init__(self):
-        self.student_data = defaultdict(lambda: {
-            'name': '',
-            'lexile': 0,
-            'proficiency': '',
-            'standards': defaultdict(lambda: {'correct': 0, 'incorrect': 0, 'partial': 0})
-        })
-        self.standards_summary = defaultdict(lambda: {'correct': 0, 'incorrect': 0, 'partial': 0, 'total_tests': 0})
+        self.student_data = {}
+        self.standards_summary = defaultdict(lambda: {'correct': 0, 'incorrect': 0, 'partial': 0})
         self.errors = []
         
     def parse_files(self, uploaded_files):
-        """Parse multiple PDF files"""
         progress_bar = st.progress(0)
         status_text = st.empty()
         
@@ -63,59 +42,90 @@ class ILEARNParser:
         return self
     
     def _parse_single_file(self, uploaded_file):
-        """Parse a single PDF"""
         doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-        current_student = None
         
-        for page in doc:
+        for page_num in range(len(doc)):
+            page = doc[page_num]
             text = page.get_text()
-            lines = text.split("\n")
             
-            for i, line in enumerate(lines):
-                # Extract student name
-                if line.startswith("Name:"):
-                    current_student = line.replace("Name:", "").strip()
-                    self.student_data[current_student]['name'] = current_student
-                
-                # Extract Lexile
-                if "Lexile® Measure Range Lower Limit:" in line:
-                    lex_match = re.search(r"(\d+)L", line)
-                    if lex_match:
-                        self.student_data[current_student]['lexile'] = int(lex_match.group(1))
-                
-                # Extract Performance Level
-                if line.startswith("Performance Level:"):
-                    prof = line.replace("Performance Level:", "").strip()
-                    self.student_data[current_student]['proficiency'] = prof
-                
-                # Extract standards and performance (looking for pattern like RC|5.RC.1)
-                standard_match = re.search(r'(RC\|5\.RC\.\d+)', line)
-                if standard_match and current_student:
-                    standard = standard_match.group(1)
-                    
-                    # Look for performance indicators in the same or next few lines
-                    check_lines = lines[i:i+3] if i < len(lines)-2 else lines[i:]
-                    context = " ".join(check_lines)
-                    
-                    # Check for symbols: ✓ (correct), ✗ (wrong), ⊖ (partial)
-                    if "✓" in context or "✔" in context:
-                        self.student_data[current_student]['standards'][standard]['correct'] += 1
-                        self.standards_summary[standard]['correct'] += 1
-                        self.standards_summary[standard]['total_tests'] += 1
-                    elif "✗" in context or "✘" in context or "X" in context:
-                        self.student_data[current_student]['standards'][standard]['incorrect'] += 1
-                        self.standards_summary[standard]['incorrect'] += 1
-                        self.standards_summary[standard]['total_tests'] += 1
-                    elif "⊖" in context or "O" in context or "○" in context:
-                        self.student_data[current_student]['standards'][standard]['partial'] += 1
-                        self.standards_summary[standard]['partial'] += 1
-                        self.standards_summary[standard]['total_tests'] += 1
+            # Extract student info from first page
+            if page_num == 0:
+                student_info = self._extract_student_info(text)
+                if student_info['name']:
+                    student_name = student_info['name']
+                    self.student_data[student_name] = {
+                        'lexile': student_info['lexile'],
+                        'proficiency': student_info['proficiency'],
+                        'standards': defaultdict(lambda: {'correct': 0, 'incorrect': 0, 'partial': 0})
+                    }
+            
+            # Extract standards from pages with tables (typically page 3+)
+            if page_num >= 2:  # Standards tables start on page 3
+                self._extract_standards_from_table(text, student_name if 'student_name' in locals() else None)
         
         doc.close()
+    
+    def _extract_student_info(self, text):
+        """Extract student name, lexile, and proficiency from first page"""
+        info = {'name': '', 'lexile': 0, 'proficiency': ''}
+        
+        lines = text.split('\n')
+        for line in lines:
+            if line.startswith('Name:'):
+                info['name'] = line.replace('Name:', '').strip()
+            elif 'Lexile® Measure Range Lower Limit:' in line:
+                lex_match = re.search(r'(\d+)L', line)
+                if lex_match:
+                    info['lexile'] = int(lex_match.group(1))
+            elif line.startswith('Performance Level:'):
+                info['proficiency'] = line.replace('Performance Level:', '').strip()
+        
+        return info
+    
+    def _extract_standards_from_table(self, text, student_name):
+        """Extract standards and performance from table pages"""
+        lines = text.split('\n')
+        
+        # Find table rows with standards
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            
+            # Look for standard pattern: RC|5.RC.X
+            standard_match = re.search(r'(RC\|5\.RC\.\d+)', line)
+            if standard_match:
+                standard = standard_match.group(1)
+                
+                # The performance symbol should be in nearby lines
+                # Look at the current line and next few lines for the symbol
+                check_range = lines[i:min(i+5, len(lines))]
+                combined_text = ' '.join(check_range)
+                
+                # Check for symbols - they might be actual unicode or text representations
+                # ✓ checkmark (correct)
+                # ✗ or X (incorrect)  
+                # ⊖ or O (partial)
+                
+                # Also check for the words in the table
+                if any(char in combined_text for char in ['✓', '✔', 'v']):
+                    perf_type = 'correct'
+                elif any(char in combined_text for char in ['✗', '✘', '×']):
+                    perf_type = 'incorrect'
+                elif any(char in combined_text for char in ['⊖', '◯', '○']):
+                    perf_type = 'partial'
+                else:
+                    # If no symbol found, skip
+                    i += 1
+                    continue
+                
+                # Update counts
+                self.standards_summary[standard][perf_type] += 1
+                
+                if student_name and student_name in self.student_data:
+                    self.student_data[student_name]['standards'][standard][perf_type] += 1
+            
+            i += 1
 
-# ===============================================================================
-# REPORT GENERATOR
-# ===============================================================================
 class ReportGenerator:
     def __init__(self, school_name="", logo_file=None):
         self.school_name = school_name
@@ -143,41 +153,42 @@ class ReportGenerator:
         pdf.cell(0, 6, f"Generated: {datetime.now().strftime('%B %d, %Y')}", ln=True, align="C")
         pdf.ln(10)
         
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, "Summary", ln=True)
-        pdf.set_font("Arial", "", 11)
-        pdf.multi_cell(0, 6, f"Total Students: {metrics['total_students']}\n"
-                             f"Average Lexile: {metrics['avg_lexile']}L")
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "Class Summary", ln=True)
+        pdf.set_font("Arial", "", 10)
+        pdf.cell(0, 6, f"Total Students: {metrics['total_students']}", ln=True)
+        pdf.cell(0, 6, f"Average Lexile: {metrics['avg_lexile']}L", ln=True)
+        pdf.cell(0, 6, f"At/Above Proficiency: {metrics['at_above_pct']:.1f}%", ln=True)
         pdf.ln(5)
         
-        pdf.set_font("Arial", "B", 14)
-        pdf.cell(0, 10, "Standards Performance", ln=True)
+        pdf.set_font("Arial", "B", 12)
+        pdf.cell(0, 8, "Standards Performance", ln=True)
         
         for _, row in df.iterrows():
-            pdf.set_font("Arial", "", 10)
-            pdf.cell(0, 6, f"{row['Standard']}: {row['Success Rate']}", ln=True)
+            pdf.set_font("Arial", "", 9)
+            pdf.cell(0, 5, f"{row['Standard']}: {row['Success Rate']}", ln=True)
         
         return pdf.output(dest="S").encode("latin-1")
 
-# ===============================================================================
-# MAIN APPLICATION
-# ===============================================================================
 def main():
     st.title("📊 ILEARN Analytics Tool")
-    st.markdown("**Designed for Indiana ILEARN Checkpoint Reports**")
+    st.markdown("**For Indiana ILEARN ELA Checkpoint Reports**")
     st.markdown("---")
     
-    # Sidebar
     with st.sidebar:
         st.header("⚙️ Settings")
         school_name = st.text_input("School Name:", placeholder="Your school")
         logo_file = st.file_uploader("School Logo:", type=["png", "jpg", "jpeg"])
         
         st.markdown("---")
-        st.markdown("### 📖 About")
-        st.markdown("Analyzes ILEARN ELA Checkpoint reports")
+        st.markdown("### 📖 How to Use")
+        st.markdown("""
+        1. Upload ILEARN PDF reports
+        2. Review class metrics
+        3. Analyze standards
+        4. Export results
+        """)
     
-    # File upload
     uploaded_files = st.file_uploader(
         "📁 Upload ILEARN PDF Reports",
         type="pdf",
@@ -188,35 +199,28 @@ def main():
         st.info("👆 Upload PDF files to begin")
         st.stop()
     
-    # Parse files
-    with st.spinner("Processing..."):
+    with st.spinner("Processing PDFs..."):
         parser = ILEARNParser()
         parser.parse_files(uploaded_files)
     
-    # Show errors
     if parser.errors:
-        with st.expander("⚠️ Warnings"):
+        with st.expander("⚠️ Processing Warnings"):
             for error in parser.errors:
                 st.warning(error)
     
-    # Check for data
     if not parser.student_data:
-        st.error("No data found in PDFs")
-        st.stop()
-    
-    if not parser.standards_summary:
-        st.error("No standards found")
+        st.error("❌ No student data found")
+        st.info("Make sure PDFs are ILEARN checkpoint reports")
         st.stop()
     
     # Calculate metrics
-    students = list(parser.student_data.keys())
-    total_students = len(students)
+    total_students = len(parser.student_data)
     
-    lexile_values = [parser.student_data[s]['lexile'] for s in students if parser.student_data[s]['lexile'] > 0]
+    lexile_values = [s['lexile'] for s in parser.student_data.values() if s['lexile'] > 0]
     avg_lexile = int(sum(lexile_values) / len(lexile_values)) if lexile_values else 0
     
-    prof_levels = [parser.student_data[s]['proficiency'] for s in students if parser.student_data[s]['proficiency']]
-    at_above = sum(1 for p in prof_levels if "At" in p or "Above" in p)
+    prof_levels = [s['proficiency'] for s in parser.student_data.values() if s['proficiency']]
+    at_above = sum(1 for p in prof_levels if 'At' in p or 'Above' in p)
     at_above_pct = (at_above / total_students * 100) if total_students else 0
     needs_support_pct = 100 - at_above_pct
     
@@ -238,8 +242,18 @@ def main():
     
     st.markdown("---")
     
-    # Standards analysis
+    # Standards summary
     st.subheader("📚 Standards Performance")
+    
+    if not parser.standards_summary:
+        st.warning("⚠️ No standards data extracted from PDFs")
+        st.info("""
+        **Debug Tips:**
+        - Make sure PDFs contain the standards performance tables
+        - Tables should have columns: Academic Standard | Performance | Student Performance
+        - Standards should be formatted as: RC|5.RC.1, RC|5.RC.2, etc.
+        """)
+        st.stop()
     
     data = []
     for standard, counts in parser.standards_summary.items():
@@ -251,13 +265,10 @@ def main():
                 'Correct (✓)': counts['correct'],
                 'Partial (⊖)': counts['partial'],
                 'Incorrect (✗)': counts['incorrect'],
+                'Total': total,
                 'Success Rate': f"{success_rate:.1f}%",
                 'Success Rate Value': success_rate
             })
-    
-    if not data:
-        st.warning("No standards performance data available")
-        st.stop()
     
     df = pd.DataFrame(data)
     df = df.sort_values('Success Rate Value', ascending=False)
@@ -265,51 +276,51 @@ def main():
     st.dataframe(df.drop('Success Rate Value', axis=1), use_container_width=True, hide_index=True)
     
     # Chart
-    fig = px.bar(
-        df,
-        x='Standard',
-        y='Success Rate Value',
-        title='Standards Success Rate',
-        labels={'Success Rate Value': 'Success Rate (%)'},
-        color='Success Rate Value',
-        color_continuous_scale='RdYlGn',
-        range_color=[0, 100]
-    )
-    fig.update_layout(height=400)
-    st.plotly_chart(fig, use_container_width=True)
+    if len(df) > 0:
+        fig = px.bar(
+            df,
+            x='Standard',
+            y='Success Rate Value',
+            title='Standards Success Rates',
+            color='Success Rate Value',
+            color_continuous_scale='RdYlGn',
+            range_color=[0, 100]
+        )
+        fig.update_layout(height=400, showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
     
     st.markdown("---")
     
     # Individual students
     st.subheader("👩‍🎓 Individual Students")
-    for student in sorted(students):
-        info = parser.student_data[student]
-        lexile_display = f"{info['lexile']}L" if info['lexile'] > 0 else "N/A"
-        prof_display = info['proficiency'] if info['proficiency'] else "N/A"
+    
+    for student_name in sorted(parser.student_data.keys()):
+        student = parser.student_data[student_name]
+        lexile_str = f"{student['lexile']}L" if student['lexile'] > 0 else "N/A"
+        prof_str = student['proficiency'] if student['proficiency'] else "N/A"
         
-        with st.expander(f"📋 {student} - Lexile: {lexile_display} | {prof_display}"):
-            if info['standards']:
-                student_rows = []
-                for standard, counts in info['standards'].items():
+        with st.expander(f"📋 {student_name} - Lexile: {lexile_str} | {prof_str}"):
+            if student['standards']:
+                rows = []
+                for std, counts in student['standards'].items():
                     total = counts['correct'] + counts['incorrect'] + counts['partial']
                     success = (counts['correct'] / total * 100) if total > 0 else 0
-                    student_rows.append({
-                        'Standard': standard,
+                    rows.append({
+                        'Standard': std,
                         'Correct': counts['correct'],
                         'Partial': counts['partial'],
                         'Incorrect': counts['incorrect'],
                         'Success Rate': f"{success:.1f}%"
                     })
                 
-                if student_rows:
-                    st.dataframe(pd.DataFrame(student_rows), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
             else:
                 st.info("No standards data for this student")
     
     st.markdown("---")
     
     # Export
-    st.subheader("💾 Export")
+    st.subheader("💾 Export Options")
     col1, col2 = st.columns(2)
     
     with col1:
@@ -317,7 +328,7 @@ def main():
         st.download_button(
             "📄 Download CSV",
             csv,
-            f"ilearn_{datetime.now().strftime('%Y%m%d')}.csv",
+            f"ilearn_report_{datetime.now().strftime('%Y%m%d')}.csv",
             "text/csv",
             use_container_width=True
         )
@@ -326,9 +337,9 @@ def main():
         report_gen = ReportGenerator(school_name, logo_file)
         pdf_bytes = report_gen.create_pdf(df.drop('Success Rate Value', axis=1), metrics)
         st.download_button(
-            "📑 Download PDF",
+            "📑 Download PDF Report",
             pdf_bytes,
-            f"ilearn_{datetime.now().strftime('%Y%m%d')}.pdf",
+            f"ilearn_report_{datetime.now().strftime('%Y%m%d')}.pdf",
             "application/pdf",
             use_container_width=True
         )
