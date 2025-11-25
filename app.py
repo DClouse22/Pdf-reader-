@@ -96,55 +96,73 @@ class ILEARNTableParser:
                     if debug:
                         st.success(f"Found proficiency: {prof}")
 
-            # Parse standards table data
-            # Look for the standard format: RC|5.RC.1 or similar
-            in_table = False
+            # Parse standards table data using improved strategy
+            # Strategy: Find table sections and group standards with their symbols
+            
+            # First, find where performance tables start
+            table_started = False
+            standards_in_page = []
+            symbols_in_page = []
+            
             for i, line in enumerate(lines):
-                # Detect table rows with standards
-                standard_match = re.search(r'(RC\|\d+\.RC\.\d+)', line)
+                # Detect start of performance table
+                if 'Student Performance*' in line or 'Performance Level Descriptor' in line:
+                    table_started = True
+                    if debug:
+                        st.info(f"Table detected at line {i}")
                 
-                if standard_match and current_student:
-                    standard = standard_match.group(1)
+                # If we're in a table, collect standards and symbols separately
+                if table_started:
+                    # Collect standards
+                    standard_match = re.search(r'(RC\|\d+\.RC\.\d+)', line)
+                    if standard_match:
+                        standards_in_page.append((i, standard_match.group(1)))
+                        if debug:
+                            st.write(f"Line {i}: Found standard {standard_match.group(1)}")
                     
-                    # Look ahead for the performance symbol in the next few lines
-                    # The symbol appears in "Student Performance*" column
-                    check_range = min(i + 5, len(lines))
+                    # Collect symbols - check for any of the performance symbols
+                    if '✓' in line or '✔' in line:
+                        symbols_in_page.append((i, 'correct', '✓'))
+                        if debug:
+                            st.write(f"Line {i}: Found ✓")
+                    elif '✗' in line or '✘' in line or '❌' in line:
+                        symbols_in_page.append((i, 'incorrect', '✗'))
+                        if debug:
+                            st.write(f"Line {i}: Found ✗")
+                    elif '⊖' in line or '◯' in line or '○' in line:
+                        symbols_in_page.append((i, 'partial', '⊖'))
+                        if debug:
+                            st.write(f"Line {i}: Found ⊖")
+            
+            # Now match standards with symbols based on proximity
+            if current_student and standards_in_page:
+                if debug:
+                    st.write(f"**Matching {len(standards_in_page)} standards with {len(symbols_in_page)} symbols**")
+                
+                for std_idx, (std_line, standard) in enumerate(standards_in_page):
+                    # Find the closest symbol that comes after this standard
+                    # but before the next standard (if any)
+                    next_std_line = standards_in_page[std_idx + 1][0] if std_idx + 1 < len(standards_in_page) else len(lines)
+                    
                     found_symbol = False
-                    
-                    for j in range(i, check_range):
-                        check_line = lines[j]
-                        
-                        # Check for correct symbol (✓)
-                        if '✓' in check_line or '✔' in check_line:
-                            self.student_data[current_student]['standards'][standard]['correct'] += 1
-                            self.standards_summary[standard]['correct'] += 1
+                    for sym_line, sym_type, sym_char in symbols_in_page:
+                        # Symbol should be between current standard and next standard
+                        if std_line <= sym_line < next_std_line:
+                            # Record the result
+                            self.student_data[current_student]['standards'][standard][sym_type] += 1
+                            self.standards_summary[standard][sym_type] += 1
+                            self.standards_summary[standard]['total_tests'] += 1
                             found_symbol = True
+                            
                             if debug:
-                                st.success(f"  {standard}: ✓ Correct")
-                            break
-                        
-                        # Check for incorrect symbol (✗)
-                        elif '✗' in check_line or '✘' in check_line or '❌' in check_line:
-                            self.student_data[current_student]['standards'][standard]['incorrect'] += 1
-                            self.standards_summary[standard]['incorrect'] += 1
-                            found_symbol = True
-                            if debug:
-                                st.error(f"  {standard}: ✗ Incorrect")
-                            break
-                        
-                        # Check for partial symbol (⊖)
-                        elif '⊖' in check_line or '◯' in check_line or '○' in check_line:
-                            self.student_data[current_student]['standards'][standard]['partial'] += 1
-                            self.standards_summary[standard]['partial'] += 1
-                            found_symbol = True
-                            if debug:
-                                st.warning(f"  {standard}: ⊖ Partial")
+                                st.success(f"  {standard}: {sym_char} {sym_type}")
+                            
+                            # Remove this symbol so it's not matched again
+                            symbols_in_page.remove((sym_line, sym_type, sym_char))
                             break
                     
-                    if found_symbol:
-                        self.standards_summary[standard]['total_tests'] += 1
-                    elif debug:
-                        st.write(f"  {standard}: No symbol found")
+                    if not found_symbol and debug:
+                        st.warning(f"  {standard}: No symbol found")
 
         doc.close()
 
