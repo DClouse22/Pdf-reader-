@@ -4,3 +4,4 @@ pymupdf
 pandas
 fpdf2
 matplotlib
+plotly
