@@ -3,9 +3,10 @@ streamlit
 pymupdf
 pandas
 fpdf2
+fpdf
 matplotlib
 plotly
 pdf2image
 Pillow
 numpy
-
+pytesseract
