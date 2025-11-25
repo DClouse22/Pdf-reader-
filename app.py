@@ -25,10 +25,10 @@ h1 {color: #1f77b4;}
 """, unsafe_allow_html=True)
 
 # =============================
-# PARSER CLASS
+# PARSER CLASS FOR TABLE-BASED PDFs
 # =============================
-class ILEARNParser:
-    """Parser for ILEARN PDF reports"""
+class ILEARNTableParser:
+    """Parser specifically designed for table-based ILEARN PDF reports"""
 
     def __init__(self):
         self.student_data = defaultdict(lambda: {
@@ -59,47 +59,92 @@ class ILEARNParser:
     def _parse_single_file(self, uploaded_file):
         doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
         current_student = None
+        
+        debug = st.session_state.get('debug_mode', False)
 
-        for page in doc:
+        for page_num, page in enumerate(doc):
             text = page.get_text()
             lines = text.split("\n")
+            
+            if debug:
+                st.write(f"**Page {page_num + 1} Sample:**")
+                st.text("\n".join(lines[:30]))
 
+            # Parse student info from first page
             for i, line in enumerate(lines):
-                # Extract student name
-                if line.strip().startswith(("Name:", "Student Name:")):
-                    current_student = line.split(":")[-1].strip()
-                    self.student_data[current_student]['name'] = current_student
+                # Extract student name - format: "Name: Last, First"
+                if line.strip().startswith("Name:"):
+                    name_part = line.split("Name:")[-1].strip()
+                    if name_part and len(name_part) > 2:
+                        current_student = name_part
+                        self.student_data[current_student]['name'] = current_student
+                        if debug:
+                            st.success(f"Found student: {current_student}")
 
-                # Extract Lexile
-                if "Lexile" in line:
-                    lex_match = re.search(r"(\d+)L", line)
+                # Extract Lexile - format: "Lexile® Measure Range Lower Limit: 725L"
+                if current_student and ("Lexile" in line and "Lower Limit:" in line):
+                    lex_match = re.search(r'(\d+)L', line)
                     if lex_match:
                         self.student_data[current_student]['lexile'] = int(lex_match.group(1))
+                        if debug:
+                            st.success(f"Found Lexile: {lex_match.group(1)}L")
 
-                # Extract Performance Level
-                if line.strip().startswith("Performance Level:"):
-                    prof = line.split(":")[-1].strip()
+                # Extract Performance Level - format: "Performance Level: Approaching Proficiency"
+                if current_student and line.strip().startswith("Performance Level:"):
+                    prof = line.split("Performance Level:")[-1].strip()
                     self.student_data[current_student]['proficiency'] = prof
+                    if debug:
+                        st.success(f"Found proficiency: {prof}")
 
-                # Extract standards
-                standard_match = re.search(r'(RC\.5\.RC\.\d+)', line)
+            # Parse standards table data
+            # Look for the standard format: RC|5.RC.1 or similar
+            in_table = False
+            for i, line in enumerate(lines):
+                # Detect table rows with standards
+                standard_match = re.search(r'(RC\|\d+\.RC\.\d+)', line)
+                
                 if standard_match and current_student:
                     standard = standard_match.group(1)
-                    check_lines = lines[i:i+3] if i < len(lines)-2 else lines[i:]
-                    context = " ".join(check_lines)
-
-                    # Normalize symbols
-                    if any(sym in context for sym in ["✓", "✔", "v"]):
-                        self.student_data[current_student]['standards'][standard]['correct'] += 1
-                        self.standards_summary[standard]['correct'] += 1
-                    elif any(sym in context for sym in ["✗", "✘", "X"]):
-                        self.student_data[current_student]['standards'][standard]['incorrect'] += 1
-                        self.standards_summary[standard]['incorrect'] += 1
-                    elif any(sym in context for sym in ["⊖", "O", "○"]):
-                        self.student_data[current_student]['standards'][standard]['partial'] += 1
-                        self.standards_summary[standard]['partial'] += 1
-
-                    self.standards_summary[standard]['total_tests'] += 1
+                    
+                    # Look ahead for the performance symbol in the next few lines
+                    # The symbol appears in "Student Performance*" column
+                    check_range = min(i + 5, len(lines))
+                    found_symbol = False
+                    
+                    for j in range(i, check_range):
+                        check_line = lines[j]
+                        
+                        # Check for correct symbol (✓)
+                        if '✓' in check_line or '✔' in check_line:
+                            self.student_data[current_student]['standards'][standard]['correct'] += 1
+                            self.standards_summary[standard]['correct'] += 1
+                            found_symbol = True
+                            if debug:
+                                st.success(f"  {standard}: ✓ Correct")
+                            break
+                        
+                        # Check for incorrect symbol (✗)
+                        elif '✗' in check_line or '✘' in check_line or '❌' in check_line:
+                            self.student_data[current_student]['standards'][standard]['incorrect'] += 1
+                            self.standards_summary[standard]['incorrect'] += 1
+                            found_symbol = True
+                            if debug:
+                                st.error(f"  {standard}: ✗ Incorrect")
+                            break
+                        
+                        # Check for partial symbol (⊖)
+                        elif '⊖' in check_line or '◯' in check_line or '○' in check_line:
+                            self.student_data[current_student]['standards'][standard]['partial'] += 1
+                            self.standards_summary[standard]['partial'] += 1
+                            found_symbol = True
+                            if debug:
+                                st.warning(f"  {standard}: ⊖ Partial")
+                            break
+                    
+                    if found_symbol:
+                        self.standards_summary[standard]['total_tests'] += 1
+                    elif debug:
+                        st.write(f"  {standard}: No symbol found")
 
         doc.close()
 
@@ -153,8 +198,8 @@ class ReportGenerator:
 # MAIN APPLICATION
 # =============================
 def main():
-    st.title("📊 ILEARN Analytics Tool")
-    st.markdown("**Designed for Indiana ILEARN Checkpoint Reports**")
+    st.title("📊 ILEARN Analytics Tool v2")
+    st.markdown("**Optimized for Indiana ILEARN Table-Based Reports**")
     st.markdown("---")
 
     # Sidebar
@@ -162,10 +207,16 @@ def main():
         st.header("⚙️ Settings")
         school_name = st.text_input("School Name:", placeholder="Your school")
         logo_file = st.file_uploader("School Logo:", type=["png", "jpg", "jpeg"])
+        
+        st.markdown("---")
+        st.markdown("### 🐛 Debug")
+        debug_mode = st.checkbox("Enable Debug Mode", value=False, 
+                                 help="Shows detailed parsing information")
+        st.session_state['debug_mode'] = debug_mode
 
         st.markdown("---")
         st.markdown("### 📖 About")
-        st.markdown("Analyzes ILEARN ELA Checkpoint reports")
+        st.markdown("Analyzes ILEARN ELA Checkpoint reports with table-based data")
 
     # File upload
     uploaded_files = st.file_uploader("📁 Upload ILEARN PDF Reports", type="pdf", accept_multiple_files=True)
@@ -176,7 +227,7 @@ def main():
 
     # Parse files
     with st.spinner("Processing..."):
-        parser = ILEARNParser()
+        parser = ILEARNTableParser()
         parser.parse_files(uploaded_files)
 
     # Show errors
