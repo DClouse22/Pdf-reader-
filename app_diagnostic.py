@@ -3,15 +3,14 @@ import fitz  # PyMuPDF
 import re
 from collections import defaultdict
 
-st.set_page_config(page_title="ILEARN Symbol Diagnostic", layout="wide")
+st.set_page_config(page_title="ILEARN Text Analysis", layout="wide")
 
-st.title("🔍 ILEARN PDF Symbol Diagnostic Tool")
-st.write("Upload your ILEARN PDF to see detailed information about the vector graphics (symbols)")
+st.title("📝 ILEARN PDF Text Character Analysis")
+st.write("Check if symbols are text characters or images")
 
 uploaded_file = st.file_uploader("Upload ILEARN PDF", type=['pdf'])
 
 if uploaded_file:
-    # Save uploaded file temporarily
     with open("/tmp/diagnostic.pdf", "wb") as f:
         f.write(uploaded_file.read())
     
@@ -19,169 +18,135 @@ if uploaded_file:
     
     st.success(f"✅ Loaded PDF with {len(doc)} pages")
     
-    # Let user select a page to analyze
-    page_num = st.selectbox("Select page to analyze:", range(len(doc)), format_func=lambda x: f"Page {x+1}")
-    
+    page_num = st.selectbox("Select page:", range(len(doc)), format_func=lambda x: f"Page {x+1}")
     page = doc[page_num]
     
-    st.subheader(f"Page {page_num + 1} Analysis")
+    st.subheader(f"Page {page_num + 1} - Character Analysis")
     
-    # Extract text to find standards
+    # Get detailed text with font information
     blocks = page.get_text("dict")["blocks"]
     
-    # Find standards on this page
-    standards_found = []
+    # Find all unique characters and their fonts
+    char_fonts = defaultdict(set)
+    font_chars = defaultdict(set)
+    all_chars = set()
+    
+    # Also track characters in the rightmost column (where symbols should be)
+    right_column_chars = []
+    
     for block in blocks:
         if "lines" in block:
             for line in block["lines"]:
                 for span in line["spans"]:
                     text = span["text"]
-                    if re.search(r'RC\|5\.RC\.\d+', text):
-                        bbox = span["bbox"]
-                        standard_match = re.search(r'(RC\|5\.RC\.\d+)', text)
-                        if standard_match:
-                            standards_found.append({
-                                'standard': standard_match.group(1),
-                                'y0': bbox[1],
-                                'y1': bbox[3],
-                                'x0': bbox[0],
-                                'x1': bbox[2]
+                    font = span["font"]
+                    bbox = span["bbox"]
+                    x_pos = bbox[0]
+                    
+                    # Track all characters
+                    for char in text:
+                        all_chars.add(char)
+                        char_fonts[char].add(font)
+                        font_chars[font].add(char)
+                    
+                    # Track characters on the right side (X > 500)
+                    if x_pos > 500:
+                        for char in text:
+                            right_column_chars.append({
+                                'char': char,
+                                'font': font,
+                                'x': x_pos,
+                                'y': bbox[1],
+                                'text': text
                             })
     
-    st.write(f"**Found {len(standards_found)} standards on this page:**")
-    for std in standards_found[:5]:  # Show first 5
-        st.write(f"- {std['standard']} at Y={std['y0']:.1f}")
+    # Display findings
+    col1, col2 = st.columns(2)
     
-    # Get all drawings
-    drawings = page.get_drawings()
+    with col1:
+        st.subheader("Right Column Characters")
+        st.write(f"Found {len(right_column_chars)} characters with X > 500")
+        
+        if right_column_chars:
+            # Group by character
+            char_counts = defaultdict(int)
+            for item in right_column_chars:
+                char_counts[item['char']] += 1
+            
+            st.write("**Character frequency:**")
+            for char, count in sorted(char_counts.items(), key=lambda x: -x[1]):
+                # Show character, its unicode, and count
+                try:
+                    unicode_name = f"U+{ord(char):04X}"
+                except:
+                    unicode_name = "?"
+                
+                # Display the character safely
+                if ord(char) < 32 or ord(char) == 127:
+                    display = f"[control char]"
+                else:
+                    display = char
+                
+                st.write(f"- '{display}' ({unicode_name}): {count}x")
+            
+            # Show sample entries
+            st.write("**Sample entries:**")
+            for item in right_column_chars[:20]:
+                st.code(f"'{item['char']}' in font '{item['font']}' at ({item['x']:.1f}, {item['y']:.1f}) - full text: '{item['text']}'")
     
-    st.write(f"**Found {len(drawings)} vector drawings on this page**")
+    with col2:
+        st.subheader("All Fonts Used")
+        st.write(f"Found {len(font_chars)} different fonts")
+        
+        for font in sorted(font_chars.keys()):
+            chars = font_chars[font]
+            # Show first 50 characters
+            char_sample = ''.join(sorted(chars)[:50])
+            st.write(f"**{font}:**")
+            st.code(char_sample)
+            st.write(f"({len(chars)} unique characters)")
+            st.write("---")
     
-    # Analyze drawings
-    if drawings:
-        st.subheader("Drawing Details")
-        
-        # Show detailed info for each drawing
-        for i, drawing in enumerate(drawings[:20]):  # Limit to first 20
-            with st.expander(f"Drawing #{i+1}"):
-                st.write("**Position:**")
-                rect = drawing.get('rect', None)
-                if rect:
-                    st.write(f"- X: {rect.x0:.1f} to {rect.x1:.1f}")
-                    st.write(f"- Y: {rect.y0:.1f} to {rect.y1:.1f}")
-                    st.write(f"- Width: {rect.x1 - rect.x0:.1f}")
-                    st.write(f"- Height: {rect.y1 - rect.y0:.1f}")
-                
-                st.write("**Colors:**")
-                st.write(f"- Fill: {drawing.get('fill', None)}")
-                st.write(f"- Stroke: {drawing.get('color', None)}")
-                st.write(f"- Width: {drawing.get('width', 0)}")
-                
-                items = drawing.get('items', [])
-                st.write(f"**Path Commands ({len(items)} total):**")
-                
-                # Count command types
-                cmd_counts = defaultdict(int)
-                for item in items:
-                    cmd_counts[item[0]] += 1
-                
-                for cmd, count in cmd_counts.items():
-                    cmd_name = {
-                        'l': 'line',
-                        'c': 'curve',
-                        're': 'rectangle',
-                        'm': 'move',
-                        'qu': 'quad curve'
-                    }.get(cmd, cmd)
-                    st.write(f"- {cmd_name}: {count}")
-                
-                # Show first few commands
-                st.write("**First few commands:**")
-                for item in items[:5]:
-                    st.code(str(item))
-                
-                # Try to match this drawing to a standard
-                if rect and standards_found:
-                    st.write("**Possible matches:**")
-                    for std in standards_found:
-                        if abs(rect.y0 - std['y0']) < 20:
-                            st.write(f"✓ Near standard {std['standard']} (ΔY = {abs(rect.y0 - std['y0']):.1f})")
-        
-        # Summary statistics
-        st.subheader("Summary Statistics")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            # Group by command pattern
-            patterns = []
-            for drawing in drawings:
-                items = drawing.get('items', [])
-                cmd_counts = defaultdict(int)
-                for item in items:
-                    cmd_counts[item[0]] += 1
-                pattern = tuple(sorted(cmd_counts.items()))
-                patterns.append(pattern)
-            
-            st.write("**Command Patterns:**")
-            pattern_counts = defaultdict(int)
-            for p in patterns:
-                pattern_counts[p] += 1
-            
-            for pattern, count in sorted(pattern_counts.items(), key=lambda x: -x[1])[:5]:
-                pattern_str = ", ".join([f"{k}={v}" for k, v in pattern])
-                st.write(f"- {pattern_str}: {count}x")
-        
-        with col2:
-            # Group by fill/stroke
-            fill_stroke = []
-            for drawing in drawings:
-                has_fill = bool(drawing.get('fill', None))
-                has_stroke = bool(drawing.get('color', None))
-                fill_stroke.append((has_fill, has_stroke))
-            
-            st.write("**Fill/Stroke:**")
-            fs_counts = defaultdict(int)
-            for fs in fill_stroke:
-                fs_counts[fs] += 1
-            
-            for (has_fill, has_stroke), count in fs_counts.items():
-                label = []
-                if has_fill:
-                    label.append("Filled")
-                if has_stroke:
-                    label.append("Stroked")
-                if not label:
-                    label.append("None")
-                st.write(f"- {' + '.join(label)}: {count}x")
-        
-        with col3:
-            # Group by size
-            st.write("**Sizes:**")
-            sizes = []
-            for drawing in drawings:
-                rect = drawing.get('rect', None)
-                if rect:
-                    width = rect.x1 - rect.x0
-                    height = rect.y1 - rect.y0
-                    sizes.append((width, height))
-            
-            if sizes:
-                avg_width = sum(s[0] for s in sizes) / len(sizes)
-                avg_height = sum(s[1] for s in sizes) / len(sizes)
-                st.write(f"- Avg Width: {avg_width:.1f}")
-                st.write(f"- Avg Height: {avg_height:.1f}")
-                st.write(f"- Min Width: {min(s[0] for s in sizes):.1f}")
-                st.write(f"- Max Width: {max(s[0] for s in sizes):.1f}")
+    # Look for special unicode symbols
+    st.subheader("Special Symbols Detected")
+    
+    special_symbols = {
+        '✓': 'Check mark',
+        '✔': 'Heavy check mark',
+        '✗': 'Ballot X',
+        '✘': 'Heavy ballot X',
+        '×': 'Multiplication sign',
+        '⊖': 'Circled minus',
+        '◯': 'White circle',
+        '○': 'White circle (alt)',
+        '●': 'Black circle',
+        '•': 'Bullet'
+    }
+    
+    found_symbols = []
+    for char in all_chars:
+        if char in special_symbols:
+            fonts = ', '.join(char_fonts[char])
+            found_symbols.append(f"- {char} ({special_symbols[char]}) in fonts: {fonts}")
+    
+    if found_symbols:
+        st.success("Found special symbols:")
+        for s in found_symbols:
+            st.write(s)
+    else:
+        st.warning("No standard unicode symbols found. Symbols might be in a custom font encoding.")
+    
+    # Check for images
+    st.subheader("Images on Page")
+    images = page.get_images()
+    if images:
+        st.write(f"Found {len(images)} images")
+        for img in images[:5]:
+            st.write(f"- Image: xref={img[0]}, size={img[2]}x{img[3]}")
+    else:
+        st.info("No images found")
     
     doc.close()
 
 else:
-    st.info("👆 Upload a PDF file to begin analysis")
-    st.write("""
-    This tool will show you:
-    - All standards found on each page
-    - All vector drawings (symbols) and their properties
-    - Which drawings are near which standards
-    - Pattern analysis to help identify checkmarks vs X's vs circles
-    """)
+    st.info("👆 Upload a PDF to analyze text characters")
