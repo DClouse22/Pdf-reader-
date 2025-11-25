@@ -63,8 +63,7 @@ class ILEARNParser:
 
         for page in doc:
             text = page.get_text()
-            lines = text.split("
-")
+            lines = text.split("\n")
 
             for i, line in enumerate(lines):
                 # Extract student name
