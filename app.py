@@ -51,11 +51,10 @@ class ILEARNParser:
             page = doc[page_num]
             text = page.get_text()
             
-            # Check for student name on every page (new student starts on page 1, 5, 9, etc.)
+            # Check for student name on every page
             student_info = self._extract_student_info(text)
             if student_info['name']:
                 current_student = student_info['name']
-                # Only create new entry if this student doesn't exist yet
                 if current_student not in self.student_data:
                     self.student_data[current_student] = {
                         'lexile': student_info['lexile'],
@@ -64,83 +63,86 @@ class ILEARNParser:
                     }
                     students_found.append(current_student)
             
-            # Extract standards from pages with tables
-            # Only process if we have a current student
+            # Extract standards from table pages
             if current_student and 'RC|5.RC' in text:
                 self._extract_standards_from_table(text, current_student)
         
         doc.close()
         
-        # Add info message about students found
         if students_found:
-            self.errors.append(f"✅ Found {len(students_found)} students in {uploaded_file.name}: {', '.join(students_found)}")
+            self.errors.append(f"✅ Found {len(students_found)} students: {', '.join(students_found)}")
     
     def _extract_student_info(self, text):
-        """Extract student name, lexile, and proficiency from page"""
+        """Extract student name, lexile, and proficiency"""
         info = {'name': '', 'lexile': 0, 'proficiency': ''}
         
         lines = text.split('\n')
-        for i, line in enumerate(lines):
-            # Student name appears as "Name: LastName, FirstName"
+        for line in lines:
             if line.startswith('Name:'):
                 name = line.replace('Name:', '').strip()
-                # Only set if it looks like a real name (not empty)
                 if name and len(name) > 2:
                     info['name'] = name
-            
-            # Lexile can appear on first page of each student
             elif 'Lexile® Measure Range Lower Limit:' in line:
                 lex_match = re.search(r'(\d+)L', line)
                 if lex_match:
                     info['lexile'] = int(lex_match.group(1))
-            
-            # Performance Level on first page of each student
             elif line.startswith('Performance Level:'):
                 info['proficiency'] = line.replace('Performance Level:', '').strip()
         
         return info
     
     def _extract_standards_from_table(self, text, student_name):
-        """Extract standards and performance from table pages"""
+        """Extract standards using a line-by-line approach looking for the pattern"""
         lines = text.split('\n')
         
-        # Find table rows with standards
+        # Strategy: Find lines with standards, then look at the NEXT non-empty line for the symbol
         i = 0
         while i < len(lines):
-            line = lines[i]
+            line = lines[i].strip()
             
-            # Look for standard pattern: RC|5.RC.X
+            # Look for standard pattern
             standard_match = re.search(r'(RC\|5\.RC\.\d+)', line)
-            if standard_match:
+            
+            if standard_match and student_name:
                 standard = standard_match.group(1)
                 
-                # The performance symbol should be in nearby lines
-                # Look at the current line and next few lines for the symbol
-                check_range = lines[i:min(i+5, len(lines))]
-                combined_text = ' '.join(check_range)
+                # Now we need to find which symbol this row has
+                # The symbol appears at the END of the table row
+                # Look in the next few lines after finding the standard
                 
-                # Check for symbols - they might be actual unicode or text representations
-                # ✓ checkmark (correct)
-                # ✗ or X (incorrect)  
-                # ⊖ or O (partial)
+                symbol_found = None
                 
-                # Also check for the words in the table
-                if any(char in combined_text for char in ['✓', '✔', 'v']):
-                    perf_type = 'correct'
-                elif any(char in combined_text for char in ['✗', '✘', '×']):
-                    perf_type = 'incorrect'
-                elif any(char in combined_text for char in ['⊖', '◯', '○']):
-                    perf_type = 'partial'
-                else:
-                    # If no symbol found, skip
-                    i += 1
-                    continue
+                # Check the SAME line first for symbols
+                if '✓' in line or '✔' in line:
+                    symbol_found = 'correct'
+                elif '✗' in line or '✘' in line or '×' in line:
+                    symbol_found = 'incorrect'
+                elif '⊖' in line or '◯' in line or '○' in line:
+                    symbol_found = 'partial'
                 
-                # Update counts
-                self.standards_summary[standard][perf_type] += 1
+                # If not found in same line, check next 2 lines
+                if not symbol_found:
+                    for j in range(i+1, min(i+3, len(lines))):
+                        next_line = lines[j]
+                        
+                        # Stop if we hit another standard (means we're in next row)
+                        if 'RC|5.RC' in next_line:
+                            break
+                        
+                        if '✓' in next_line or '✔' in next_line:
+                            symbol_found = 'correct'
+                            break
+                        elif '✗' in next_line or '✘' in next_line or '×' in next_line:
+                            symbol_found = 'incorrect'
+                            break
+                        elif '⊖' in next_line or '◯' in next_line or '○' in next_line:
+                            symbol_found = 'partial'
+                            break
                 
-                if student_name and student_name in self.student_data:
-                    self.student_data[student_name]['standards'][standard][perf_type] += 1
+                # Update counts if we found a symbol
+                if symbol_found:
+                    self.standards_summary[standard][symbol_found] += 1
+                    self.student_data[student_name]['standards'][standard][symbol_found] += 1
             
             i += 1
 
@@ -267,12 +269,12 @@ def main():
     st.subheader("📚 Standards Performance")
     
     if not parser.standards_summary:
-        st.warning("⚠️ No standards data extracted from PDFs")
+        st.warning("⚠️ No standards data extracted")
         st.info("""
-        **Debug Tips:**
-        - Make sure PDFs contain the standards performance tables
-        - Tables should have columns: Academic Standard | Performance | Student Performance
-        - Standards should be formatted as: RC|5.RC.1, RC|5.RC.2, etc.
+        **Possible reasons:**
+        - Standards tables may use image-based symbols
+        - Try using OCR or different extraction method
+        - Contact support with a sample PDF
         """)
         st.stop()
     
